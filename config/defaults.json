@@ -1,0 +1,18 @@
+{
+  "platforms": ["xhs", "dy"],
+  "default_recent_days": 30,
+  "default_min_likes": 200,
+  "default_max_items": 10,
+  "hard_max_items": 50,
+  "candidate_scan_limit": 50,
+  "max_creators": 20,
+  "video_only": true,
+  "transcribe_video": true,
+  "comments": false,
+  "sub_comments": false,
+  "download_images": false,
+  "proxy": false,
+  "concurrency": 1,
+  "output": "excel",
+  "browser_profile": "runtime/browser_profile/test"
+}
