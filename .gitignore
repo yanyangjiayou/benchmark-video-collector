@@ -1,0 +1,43 @@
+# 本机依赖与第三方源码
+vendor/
+.venv/
+venv/
+node_modules/
+.uv/
+dist/
+build/
+*.egg-info/
+# 登录态、运行数据与输出
+browser_data/
+runtime/
+output/
+data/
+logs/
+*.log
+*.ses
+*.db
+*.sqlite*
+*.xlsx
+*.mp4
+*.m4a
+*.wav
+# 密钥与本地设置
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# 缓存与系统文件
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.tmp
+*.swp
