@@ -48,6 +48,20 @@ def test_crawler_error_with_zero_exit_is_not_an_empty_success(tmp_path, monkeypa
     assert next((tmp_path / "runtime/jobs").glob("*/crawler.log")).read_text() == "ERROR login failed\n"
 
 
+def test_crawler_subprocess_reuses_current_python(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    monkeypatch.setattr(pipeline.sys, "executable", "C:\\video-collector\\.venv\\Scripts\\python.exe")
+    observed = {}
+
+    def popen(command, *args, **kwargs):
+        observed["command"] = command
+        return FakeCrawler()
+
+    monkeypatch.setattr(pipeline.subprocess, "Popen", popen)
+    pipeline.run_job(request(), "", lambda message: None)
+    assert observed["command"][0] == "C:\\video-collector\\.venv\\Scripts\\python.exe"
+
+
 def test_douyin_image_post_audio_is_not_a_video():
     assert not pipeline.is_video({"video_download_url": "audio.mp4", "note_download_url": "photo.jpeg"}, "dy")
     assert pipeline.is_video({"video_download_url": "video.mp4", "note_download_url": ""}, "dy")

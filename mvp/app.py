@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -49,10 +50,14 @@ def login_worker(platform: str) -> None:
     login_state.update(status="checking", platform=platform, message="正在检查登录；如未登录将打开扫码页")
     root = Path(__file__).resolve().parents[1]
     vendor = root / "vendor" / "MediaCrawler"
-    env = {**os.environ, "PYTHONPATH": f"{root}:{vendor}", "MPLCONFIGDIR": str(root / "runtime/matplotlib")}
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(root), str(vendor))),
+        "MPLCONFIGDIR": str(root / "runtime/matplotlib"),
+    }
     try:
         process = subprocess.run(
-            [str(vendor / ".venv/bin/python"), "-m", "mvp.login_worker", platform],
+            [sys.executable, "-m", "mvp.login_worker", platform],
             cwd=vendor, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=210
         )
         if process.returncode == 0 and "MVP_LOGIN_CONFIRMED" in process.stdout:

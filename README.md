@@ -14,11 +14,13 @@
 - 默认最近 30 天、最低 200 赞、最多 10 条；单次硬上限 50 条。
 - 本地服务监听 `127.0.0.1:8000`，扫码与验证码由用户手动完成。
 
-## 安装与运行（macOS）
+## 运行环境
 
-需要 Python 3.11+、Node.js（供第三方采集器执行 JavaScript）、uv，以及可用的浏览器环境。启动脚本使用 zsh。
+需要 64 位操作系统、Python 3.11+、Node.js（供第三方采集器执行 JavaScript）、uv，以及可用的浏览器环境。代码提供 macOS 和 64 位 Windows 10/11 启动方式；Windows 仍需在目标电脑完成平台登录与采集冒烟验证。Windows on ARM 尚未验证。
 
 本仓库不包含 MediaCrawler 第三方源码及本机环境。先阅读 [MediaCrawler 项目](https://github.com/NanmiCoder/MediaCrawler) 的安装说明与许可证，自行取得兼容版本并放置在 `vendor/MediaCrawler/`，保留其许可证。该目录已加入 Git 忽略规则，不要随本项目上传。
+
+### macOS
 
 在本项目根目录执行：
 
@@ -33,6 +35,21 @@ zsh scripts/start.sh
 ```
 
 打开 http://127.0.0.1:8000 。环境安装完成后也可双击 `启动工具.command`。首次转写可能需要下载模型，输出保存在 `output/`。
+
+### Windows 10/11（x86-64）
+
+建议将整个项目放在不含中文、层级较浅的路径，例如 `C:\video-collector`，以减少第三方工具的路径兼容问题。安装好 uv、Node.js 16+ 和 Chrome/Edge 后，在 PowerShell 中执行：
+
+```powershell
+cd C:\video-collector
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
+```
+
+也可以依次双击 `安装依赖-Windows.bat` 和 `启动工具-Windows.bat`。浏览器打开后访问 http://127.0.0.1:8000 。
+
+当前转写固定使用 CPU `int8`，普通 Intel/AMD Windows 电脑不需要 NVIDIA 显卡或 CUDA。建议至少 8 GB 内存，16 GB 更合适。首次选择 `small` 或 `medium` 模型时需要联网下载模型；普通电脑优先使用默认的 `small`。`faster-whisper` 通过 PyAV 解码媒体，通常无需单独安装 FFmpeg。若导入 CTranslate2 时提示缺少运行库，请安装 Microsoft Visual C++ Redistributable。
+
 已完成内容的去重记录保存在 `runtime/collection_history.sqlite3`，重启工具后仍有效。未取得视频或转写失败的内容不会写入历史，下次可自动重试。
 每次采集的 Excel（包括 0 条新内容的批次）都会持久保存在 `output/`。网页底部的“历史采集 Excel”会显示采集时间、平台、博主账号、结果数和下载入口。
 
@@ -48,8 +65,16 @@ zsh scripts/start.sh
 
 ## 验证与限制
 
+macOS：
+
 ```sh
 vendor/MediaCrawler/.venv/bin/python -m pytest tests -q
+```
+
+Windows：
+
+```powershell
+.\vendor\MediaCrawler\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
 此发布版已在当前电脑完成抖音真实账号的采集、视频下载、转写、Excel 导出和二次去重验证；在全新电脑安装或更换 MediaCrawler 版本后仍需重新验证接口兼容性。抖音与小红书实际采集结果取决于平台和依赖状态。

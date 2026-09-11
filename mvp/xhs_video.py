@@ -122,11 +122,11 @@ def download_missing_videos(items: list[dict], raw: Path, log: Callable[[str], N
     request_path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
     env = {
         **os.environ,
-        "PYTHONPATH": f"{ROOT}:{VENDOR}",
+        "PYTHONPATH": os.pathsep.join((str(ROOT), str(VENDOR))),
         "MPLCONFIGDIR": str(ROOT / "runtime/matplotlib"),
     }
     command = [
-        str(VENDOR / ".venv/bin/python"),
+        sys.executable,
         "-m",
         "mvp.xhs_video_worker",
         str(request_path),

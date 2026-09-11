@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, re, shutil, subprocess, time, uuid
+import hashlib, json, os, re, shutil, subprocess, sys, time, uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -136,7 +136,7 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     imported = history.import_excel_exports(ROOT / "output")
     if imported:
         log(f"已从旧 Excel 结果导入 {imported} 条历史采集标记")
-    cmd = [str(VENDOR / ".venv/bin/python"), "main.py", "--platform", request.platform, "--lt", "qrcode",
+    cmd = [sys.executable, "main.py", "--platform", request.platform, "--lt", "qrcode",
            "--save_data_option", "jsonl", "--save_data_path", str(raw), "--crawler_max_notes_count", "50",
            "--max_concurrency_num", "1", "--get_comment", "false", "--get_sub_comment", "false",
            "--enable_ip_proxy", "false"]
