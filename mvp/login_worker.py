@@ -25,15 +25,28 @@ async def main(platform: str) -> None:
         crawler.get_creators_and_notes = noop
     elif platform == "dy":
         from media_platform.douyin import DouYinCrawler
+        from .douyin_session import configure_session, save_session
         crawler = DouYinCrawler()
-        crawler.search = noop
-        crawler.get_specified_awemes = noop
-        crawler.get_creators_and_videos = noop
+        configure_session(crawler, allow_login=True)
+
+        async def confirm_session(*args, **kwargs):
+            await save_session(crawler.browser_context)
+
+        crawler.search = confirm_session
+        crawler.get_specified_awemes = confirm_session
+        crawler.get_creators_and_videos = confirm_session
     else:
         raise ValueError("首版只支持小红书和抖音")
-    await crawler.start()
-    print("MVP_LOGIN_CONFIRMED")
+    try:
+        # Bound the third-party login wait; the worker always releases its browser.
+        await asyncio.wait_for(crawler.start(), timeout=180)
+        print("MVP_LOGIN_CONFIRMED", flush=True)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("登录超时，请在平台窗口完成扫码或验证后重试") from exc
+    finally:
+        manager = getattr(crawler, "cdp_manager", None)
+        if manager:
+            await manager.cleanup(force=True)
 
 if __name__ == "__main__":
     asyncio.run(main(sys.argv[1]))
-

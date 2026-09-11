@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 class LocalTranscriber:
     """延迟加载本地 Whisper 模型，避免启动网页时占用大量内存。"""
 
-    def __init__(self, model_name: str = "small") -> None:
+    def __init__(self, model_name: str = "small", on_stage: Callable[[str], None] | None = None) -> None:
         self.model_name = model_name
+        self.on_stage = on_stage
         self._model = None
 
-    def _load(self):
+    def load(self):
         if self._model is None:
+            if self.on_stage:
+                self.on_stage(f"正在加载 {self.model_name} 转写模型（首次使用会先下载模型）")
             from faster_whisper import WhisperModel
 
             self._model = WhisperModel(
@@ -26,7 +29,7 @@ class LocalTranscriber:
         path = Path(media_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
-        segments, _ = self._load().transcribe(
+        segments, _ = self.load().transcribe(
             str(path),
             language="zh",
             vad_filter=True,

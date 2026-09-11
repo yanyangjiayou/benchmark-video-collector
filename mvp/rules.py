@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+from .sources import normalize_creator_url
 
 
 class CollectionRequest(BaseModel):
@@ -30,6 +31,8 @@ class CollectionRequest(BaseModel):
             raise ValueError("开始日期不能晚于结束日期")
         if self.trigger_type == "creator_url" and not self.creator_url.strip():
             raise ValueError("指定博主模式必须填写主页链接")
+        if self.trigger_type == "creator_url":
+            self.creator_url = normalize_creator_url(self.creator_url, self.platform)
         if self.trigger_type == "keyword" and not any(k.strip() for k in self.keywords):
             raise ValueError("关键词模式必须至少填写一个关键词")
         return self
