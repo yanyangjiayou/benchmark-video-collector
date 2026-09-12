@@ -202,8 +202,16 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
                 "stage": "采集阶段已停止",
                 "found": int(worker_stats.get("found", 0)),
                 "details_requested": int(worker_stats.get("details_requested", 0)),
+                "non_video_filtered": int(worker_stats.get("non_video_filtered", 0)),
                 "likes_filtered": int(worker_stats.get("likes_filtered", 0)),
+                "date_filtered": int(worker_stats.get("date_filtered", 0)),
+                "date_prefiltered": int(worker_stats.get("date_prefiltered", 0)),
+                "date_detail_filtered": int(worker_stats.get("date_detail_filtered", 0)),
                 "followers_filtered": int(worker_stats.get("followers_filtered", 0)),
+                "author_cards_filtered": int(worker_stats.get("author_cards_filtered", 0)),
+                "creators_checked": int(worker_stats.get("creators_checked", 0)),
+                "follower_filter_enabled": bool(worker_stats.get("follower_filter_enabled", False)),
+                "trigger_type": worker_stats.get("trigger_type", request.trigger_type),
                 "history_skipped": int(worker_stats.get("history_skipped", 0)),
                 "metric_missing_skipped": sum(
                     int(worker_stats.get(key, 0))
@@ -241,11 +249,19 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     metric_missing_skipped = likes_missing + time_missing + followers_missing
     summary = {"found": int(worker_stats.get("found", len(all_rows))),
                "videos": int(worker_stats.get("videos", len(video_rows))),
+               "non_video_filtered": int(worker_stats.get("non_video_filtered", len(all_rows) - len(video_rows))),
                "in_date_range": int(worker_stats.get("in_date_range", len(date_rows))),
+               "date_filtered": int(worker_stats.get("date_filtered", len(video_rows) - len(date_rows))),
                "eligible_total": selection["eligible_total"], "eligible": len(candidates), "history_skipped": history_skipped,
                "duplicates_in_scan": duplicates_in_scan, "content_duplicates": 0,
                "likes_filtered": int(worker_stats.get("likes_filtered", 0)),
                "followers_filtered": int(worker_stats.get("followers_filtered", 0)),
+               "author_cards_filtered": int(worker_stats.get("author_cards_filtered", 0)),
+               "creators_checked": int(worker_stats.get("creators_checked", 0)),
+               "follower_filter_enabled": bool(worker_stats.get("follower_filter_enabled", request.min_followers is not None)),
+               "trigger_type": worker_stats.get("trigger_type", request.trigger_type),
+               "date_prefiltered": int(worker_stats.get("date_prefiltered", 0)),
+               "date_detail_filtered": int(worker_stats.get("date_detail_filtered", 0)),
                "likes_missing": likes_missing,
                "time_missing": time_missing,
                "followers_missing": followers_missing,
@@ -257,11 +273,18 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
                "stage": "筛选完成", "estimated_total_seconds": 90 + len(candidates) * (75 if model_name == "small" else 130)}
     if progress:
         progress(summary)
-    log(f"筛选结果：扫描 {summary['found']} 条，只请求了 {summary['details_requested']} 条详情，本次新采集 {len(candidates)} 条")
+    log(
+        f"筛选结果：读取 {summary['found']} 条列表卡片，排除 {summary['non_video_filtered']} 条非视频，"
+        f"对 {summary['details_requested']} 条候选读取详情核验，最终新采集 {len(candidates)} 条"
+    )
+    if summary["date_prefiltered"]:
+        log(f"列表日期预筛已排除 {summary['date_prefiltered']} 条，无需读取这些详情")
+    if summary["date_detail_filtered"]:
+        log(f"详情日期复核后排除 {summary['date_detail_filtered']} 条内容")
     if summary["likes_filtered"]:
         log(f"列表点赞数预筛选已排除 {summary['likes_filtered']} 条，无需打开这些详情")
     if summary["followers_filtered"]:
-        log(f"粉丝数筛选已排除 {summary['followers_filtered']} 个候选")
+        log(f"粉丝数筛选已排除 {summary['followers_filtered']} 位博主")
     if metric_missing_skipped:
         log(
             f"有 {metric_missing_skipped} 条因平台未返回可核验指标而跳过"

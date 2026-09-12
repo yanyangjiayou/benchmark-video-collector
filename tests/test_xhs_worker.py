@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 import sys
 from types import SimpleNamespace
 
@@ -11,8 +11,10 @@ from mvp.xhs_worker import (
     FilteredXhsCrawlerMixin,
     extract_follower_count,
     is_access_restriction,
+    note_id_published_date,
     normalise_card,
     parse_metric,
+    parse_published_date,
 )
 
 
@@ -23,6 +25,16 @@ def test_metric_parser_distinguishes_missing_from_zero():
     assert parse_metric("2.8万") == 28_000
     assert parse_metric("1.2w") == 12_000
     assert parse_metric("3.5k") == 3_500
+
+
+def test_list_date_parser_supports_explicit_relative_and_note_id_dates():
+    reference = date(2026, 9, 12)
+    assert parse_published_date("2026-08-23", reference) == date(2026, 8, 23)
+    assert parse_published_date("08-23", reference) == date(2026, 8, 23)
+    assert parse_published_date("昨天", reference) == date(2026, 9, 11)
+    stamp = int(datetime(2026, 8, 23).timestamp())
+    note_id = f"{stamp:08x}" + "0" * 16
+    assert note_id_published_date(note_id, reference) == date(2026, 8, 23)
 
 
 def test_search_card_exposes_filter_fields_without_detail_request():
@@ -50,6 +62,17 @@ def test_creator_card_shape_is_also_supported():
     })
     assert card["note_id"] == "note-2"
     assert card["liked_count"] == 11_000
+
+
+def test_creator_card_exposes_explicit_list_date():
+    card = normalise_card({
+        "note_id": "note-with-date",
+        "type": "video",
+        "publish_time": "2026-08-23",
+        "interact_info": {"liked_count": "900"},
+    })
+    assert card["published_date"] == date(2026, 8, 23)
+    assert card["published_date_source"] == "list"
 
 
 def test_follower_count_requires_an_explicit_follower_field():
@@ -125,13 +148,14 @@ def test_list_filter_avoids_detail_for_low_likes_and_history(tmp_path, monkeypat
     crawler.request_pause_min = crawler.request_pause_max = 0
     crawler.xhs_client = Client()
     crawler.stats = {
-        "found": 0, "videos": 0, "history_skipped": 0, "duplicates_in_scan": 0,
+        "found": 0, "videos": 0, "non_video_filtered": 0, "history_skipped": 0, "duplicates_in_scan": 0,
         "likes_filtered": 0, "followers_filtered": 0, "details_requested": 0,
-        "profile_requests": 0, "in_date_range": 0,
+        "profile_requests": 0, "in_date_range": 0, "date_filtered": 0,
         "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
     }
 
     async def exercise():
+        await crawler._consider({"id": "image", "note_card": {"type": "normal", "interact_info": {"liked_count": "900"}}})
         await crawler._consider({"id": "low", "note_card": {"type": "video", "interact_info": {"liked_count": "100"}}})
         await crawler._consider({"id": "old", "note_card": {"type": "video", "interact_info": {"liked_count": "900"}}})
         # A missing list counter is verified through detail data instead of being
@@ -141,6 +165,7 @@ def test_list_filter_avoids_detail_for_low_likes_and_history(tmp_path, monkeypat
     asyncio.run(exercise())
     assert crawler.xhs_client.detail_calls == ["new"]
     assert crawler.stats["likes_filtered"] == 1
+    assert crawler.stats["non_video_filtered"] == 1
     assert crawler.stats["history_skipped"] == 1
     assert crawler.selected[0]["note_id"] == "new"
     assert stored == ["new"]
@@ -184,9 +209,9 @@ def test_missing_detail_likes_falls_back_to_verified_list_value(tmp_path, monkey
     crawler.request_pause_min = crawler.request_pause_max = 0
     crawler.xhs_client = Client()
     crawler.stats = {
-        "found": 0, "videos": 0, "history_skipped": 0, "duplicates_in_scan": 0,
+        "found": 0, "videos": 0, "non_video_filtered": 0, "history_skipped": 0, "duplicates_in_scan": 0,
         "likes_filtered": 0, "followers_filtered": 0, "details_requested": 0,
-        "profile_requests": 0, "in_date_range": 0,
+        "profile_requests": 0, "in_date_range": 0, "date_filtered": 0,
         "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
     }
 
@@ -197,6 +222,99 @@ def test_missing_detail_likes_falls_back_to_verified_list_value(tmp_path, monkey
 
     assert stored == ["fallback"]
     assert crawler.stats["likes_missing"] == 0
+
+
+def test_list_date_prefilter_avoids_detail_request(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "store", SimpleNamespace(xhs=SimpleNamespace()))
+
+    class Client:
+        async def get_note_by_id(self, *args):
+            raise AssertionError("日期范围外的卡片不应读取详情")
+
+    crawler = FilteredXhsCrawlerMixin()
+    crawler.collection_request = CollectionRequest(
+        platform="xhs", trigger_type="keyword", keywords=["测试"],
+        start_date=date(2026, 9, 1), end_date=date(2026, 9, 12),
+        min_likes=350, max_items=2,
+    )
+    crawler.history = CollectionHistory(tmp_path / "history.sqlite3")
+    crawler.seen_in_scan = set()
+    crawler.selected = []
+    crawler.author_followers = {}
+    crawler.rejected_authors = set()
+    crawler.current_creator_id = ""
+    crawler.last_missing_metric = ""
+    crawler.consecutive_missing_metrics = 0
+    crawler.last_request_at = 0.0
+    crawler.request_pause_min = crawler.request_pause_max = 0
+    crawler.xhs_client = Client()
+    crawler.stats = {
+        "found": 0, "videos": 0, "non_video_filtered": 0, "history_skipped": 0,
+        "duplicates_in_scan": 0, "likes_filtered": 0, "followers_filtered": 0,
+        "author_cards_filtered": 0, "details_requested": 0, "profile_requests": 0,
+        "creators_checked": 0, "in_date_range": 0, "date_filtered": 0,
+        "date_prefiltered": 0, "date_detail_filtered": 0,
+        "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
+    }
+
+    asyncio.run(crawler._consider({
+        "id": "old-date", "note_card": {"type": "video", "publish_time": "2026-08-23",
+        "interact_info": {"liked_count": "900"}},
+    }))
+
+    assert crawler.stats["date_prefiltered"] == 1
+    assert crawler.stats["details_requested"] == 0
+
+
+def test_keyword_follower_filter_runs_before_detail_and_is_cached(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "store", SimpleNamespace(xhs=SimpleNamespace()))
+
+    class Client:
+        def __init__(self):
+            self.profile_calls = 0
+
+        async def get_creator_info(self, **kwargs):
+            self.profile_calls += 1
+            return {"fans": "120"}
+
+        async def get_note_by_id(self, *args):
+            raise AssertionError("粉丝不足的博主不应读取作品详情")
+
+    crawler = FilteredXhsCrawlerMixin()
+    crawler.collection_request = CollectionRequest(
+        platform="xhs", trigger_type="keyword", keywords=["测试"],
+        min_followers=500, min_likes=0, max_items=2,
+    )
+    crawler.history = CollectionHistory(tmp_path / "history.sqlite3")
+    crawler.seen_in_scan = set()
+    crawler.selected = []
+    crawler.author_followers = {}
+    crawler.rejected_authors = set()
+    crawler.current_creator_id = ""
+    crawler.last_missing_metric = ""
+    crawler.consecutive_missing_metrics = 0
+    crawler.last_request_at = 0.0
+    crawler.request_pause_min = crawler.request_pause_max = 0
+    crawler.xhs_client = Client()
+    crawler.stats = {
+        "found": 0, "videos": 0, "non_video_filtered": 0, "history_skipped": 0,
+        "duplicates_in_scan": 0, "likes_filtered": 0, "followers_filtered": 0,
+        "author_cards_filtered": 0, "details_requested": 0, "profile_requests": 0,
+        "creators_checked": 0, "in_date_range": 0, "date_filtered": 0,
+        "date_prefiltered": 0, "date_detail_filtered": 0,
+        "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
+    }
+
+    card = {"note_card": {"type": "video", "user": {"user_id": "author-low"},
+            "interact_info": {"liked_count": "900"}}}
+    asyncio.run(crawler._consider({"id": "low-author-1", **card}))
+    asyncio.run(crawler._consider({"id": "low-author-2", **card}))
+
+    assert crawler.xhs_client.profile_calls == 1
+    assert crawler.stats["creators_checked"] == 1
+    assert crawler.stats["followers_filtered"] == 1
+    assert crawler.stats["author_cards_filtered"] == 2
+    assert crawler.stats["details_requested"] == 0
 
 
 def test_one_missing_metric_is_skipped_but_three_consecutive_stop():

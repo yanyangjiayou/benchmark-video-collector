@@ -18,6 +18,11 @@ PLATFORM_PAGE_MARKERS = {
     "dy": ("douyin.com",),
 }
 
+# Fixed ports isolate the formal `video` application from historical copies that
+# use MediaCrawler's defaults around 9222.  Each platform gets one exact port so
+# a worker can never discover and attach to another project's login browser.
+PLATFORM_CDP_PORTS = {"xhs": 9333, "dy": 9334}
+
 
 def find_platform_browser(platform: str, start_port: int = 9222, port_count: int = 100) -> int | None:
     """Return a CDP port only when its open pages belong to the requested platform."""
@@ -55,10 +60,10 @@ async def main(platform: str) -> None:
     config.ENABLE_GET_COMMENTS = False
     # Reuse the requested platform's browser after login. Starting a second Chrome
     # process with the same profile makes Chrome exit immediately.
-    existing_port = find_platform_browser(platform, config.CDP_DEBUG_PORT)
+    requested_port = PLATFORM_CDP_PORTS[platform]
+    existing_port = find_platform_browser(platform, requested_port, 1)
     config.CDP_CONNECT_EXISTING = existing_port is not None
-    if existing_port is not None:
-        config.CDP_DEBUG_PORT = existing_port
+    config.CDP_DEBUG_PORT = requested_port
     # Keep the logged-in browser alive so the 采集 step can reuse it over CDP.
     # Closing it here would force 采集 to auto-launch a second Chrome with the same
     # profile, which exits almost immediately and breaks the run.

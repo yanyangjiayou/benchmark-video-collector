@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from .login_worker import find_platform_browser
+from .login_worker import PLATFORM_CDP_PORTS, find_platform_browser
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "MediaCrawler"
@@ -21,8 +21,8 @@ def _looks_like_video(url: str) -> bool:
 
 def configure_existing_xhs_browser(config: object) -> int:
     """Require and reuse the browser created by the explicit login step."""
-    start_port = int(getattr(config, "CDP_DEBUG_PORT", 9222))
-    existing_port = find_platform_browser("xhs", start_port)
+    expected_port = PLATFORM_CDP_PORTS["xhs"]
+    existing_port = find_platform_browser("xhs", expected_port, 1)
     if existing_port is None:
         raise RuntimeError("补取视频需要已确认登录的小红书窗口；请重新确认登录后再试")
     config.CDP_CONNECT_EXISTING = True

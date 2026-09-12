@@ -104,7 +104,7 @@ def test_xhs_failure_keeps_scan_counts_visible(tmp_path, monkeypatch):
     def popen(*args, **kwargs):
         job = next((tmp_path / "runtime" / "jobs").iterdir())
         (job / "xhs_scan_summary.json").write_text(
-            '{"found": 3, "details_requested": 3, "likes_missing": 3, "selected": 0}',
+            '{"found": 3, "details_requested": 3, "non_video_filtered": 0, "date_filtered": 0, "likes_missing": 3, "selected": 0}',
             encoding="utf-8",
         )
         return FakeCrawler("RuntimeError: MVP_XHS_METRIC_UNAVAILABLE\n", code=1)
@@ -115,6 +115,8 @@ def test_xhs_failure_keeps_scan_counts_visible(tmp_path, monkeypatch):
 
     assert updates[-1]["found"] == 3
     assert updates[-1]["details_requested"] == 3
+    assert updates[-1]["non_video_filtered"] == 0
+    assert updates[-1]["date_filtered"] == 0
     assert updates[-1]["metric_missing_skipped"] == 3
 
 

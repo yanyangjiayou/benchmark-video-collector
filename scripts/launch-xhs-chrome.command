@@ -5,13 +5,19 @@ SCRIPT_DIR=${0:A:h}
 APP_ROOT=${SCRIPT_DIR:h}
 DATA_DIR="$APP_ROOT/vendor/MediaCrawler/browser_data/cdp_xhs_user_data_dir"
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-PORT=9222
+PORT=9333
 
 mkdir -p "$DATA_DIR"
 
 if lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
-  osascript -e "display notification \"端口 $PORT 已被占用，请直接复用该浏览器窗口，无需再启动。\" with title \"小红书 Chrome 已就绪\""
-  exit 0
+  LISTENER_PID=$(lsof -tiTCP:$PORT -sTCP:LISTEN | head -n 1)
+  LISTENER_COMMAND=$(ps -p "$LISTENER_PID" -o command= 2>/dev/null || true)
+  if [[ "$LISTENER_COMMAND" == *"--user-data-dir=$DATA_DIR"* ]]; then
+    osascript -e "display notification \"正式版专用浏览器已在运行，无需重复启动。\" with title \"小红书 Chrome 已就绪\""
+    exit 0
+  fi
+  osascript -e "display alert \"小红书 Chrome 启动失败\" message \"正式版专用端口 $PORT 被其他程序占用。为防止连接到旧版本，程序不会复用该窗口。\" as critical"
+  exit 1
 fi
 
 if [[ ! -x "$CHROME" ]]; then

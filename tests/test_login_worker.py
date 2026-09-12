@@ -5,7 +5,7 @@ import json
 
 from types import SimpleNamespace
 
-from mvp.login_worker import find_platform_browser, preserve_launched_browser
+from mvp.login_worker import PLATFORM_CDP_PORTS, find_platform_browser, preserve_launched_browser
 
 
 def _response(pages: list[dict]) -> io.BytesIO:
@@ -28,6 +28,10 @@ def test_find_platform_browser_does_not_reuse_another_platform(monkeypatch):
     )
 
     assert find_platform_browser("dy", 9222, 1) is None
+
+
+def test_formal_application_uses_ports_outside_historical_defaults():
+    assert PLATFORM_CDP_PORTS == {"xhs": 9333, "dy": 9334}
 
 
 def test_successful_login_detaches_launched_browser_from_exit_cleanup():

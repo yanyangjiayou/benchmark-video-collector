@@ -10,9 +10,10 @@ import asyncio
 import json
 import math
 import random
+import re
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "MediaCrawler"
 sys.path.insert(0, str(VENDOR))
 
-from .login_worker import find_platform_browser
+from .login_worker import PLATFORM_CDP_PORTS, find_platform_browser
 
 ACCESS_RESTRICTED = "MVP_XHS_ACCESS_RESTRICTED"
 LOGIN_REQUIRED = "MVP_XHS_LOGIN_REQUIRED"
@@ -49,19 +50,93 @@ def parse_metric(value: object) -> int | None:
         return None
 
 
+def parse_published_date(value: object, reference_date: date | None = None) -> date | None:
+    """Parse dates and timestamps exposed directly on a list card."""
+    reference = reference_date or datetime.now().date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        stamp = float(value)
+        if stamp > 10_000_000_000:
+            stamp /= 1000
+        try:
+            result = datetime.fromtimestamp(stamp).date()
+        except (OSError, OverflowError, ValueError):
+            return None
+        return result if date(2010, 1, 1) <= result <= reference + timedelta(days=2) else None
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{10,13}", text):
+        return parse_published_date(int(text), reference)
+    if text in {"今天", "today", "刚刚"} or re.fullmatch(r"\d+小时前", text):
+        return reference
+    if text in {"昨天", "yesterday"}:
+        return reference - timedelta(days=1)
+    if text == "前天":
+        return reference - timedelta(days=2)
+    relative = re.fullmatch(r"(\d+)天前", text)
+    if relative:
+        return reference - timedelta(days=int(relative.group(1)))
+
+    full = re.search(r"(20\d{2})\s*[-/.\u5e74]\s*(\d{1,2})\s*[-/.\u6708]\s*(\d{1,2})", text)
+    if full:
+        try:
+            return date(int(full.group(1)), int(full.group(2)), int(full.group(3)))
+        except ValueError:
+            return None
+    month_day = re.fullmatch(r"(\d{1,2})\s*[-/.\u6708]\s*(\d{1,2})(?:\s*日)?", text)
+    if month_day:
+        try:
+            result = date(reference.year, int(month_day.group(1)), int(month_day.group(2)))
+            if result > reference + timedelta(days=2):
+                result = date(reference.year - 1, result.month, result.day)
+            return result
+        except ValueError:
+            return None
+    return None
+
+
+def note_id_published_date(note_id: str, reference_date: date | None = None) -> date | None:
+    """Derive a provisional creation date from a 24-hex note ID when possible."""
+    reference = reference_date or datetime.now().date()
+    if not re.fullmatch(r"[0-9a-fA-F]{24}", note_id):
+        return None
+    return parse_published_date(int(note_id[:8], 16), reference)
+
+
 def normalise_card(item: dict[str, Any]) -> dict[str, Any]:
     """Return the common fields exposed by search and creator list cards."""
     card = item.get("note_card") if isinstance(item.get("note_card"), dict) else item
     interaction = card.get("interact_info") if isinstance(card.get("interact_info"), dict) else {}
     user = card.get("user") if isinstance(card.get("user"), dict) else {}
+    note_id = str(item.get("id") or item.get("note_id") or card.get("note_id") or "")
+    published = None
+    for key in (
+        "time", "publish_time", "publishTime", "published_at", "publish_at",
+        "create_time", "createTime", "publish_date", "publishDate",
+    ):
+        if key in card or key in item:
+            published = parse_published_date(card.get(key, item.get(key)))
+            if published is not None:
+                break
+    date_source = "list" if published is not None else ""
+    if published is None:
+        published = note_id_published_date(note_id)
+        date_source = "note_id" if published is not None else ""
     return {
-        "note_id": str(item.get("id") or item.get("note_id") or card.get("note_id") or ""),
+        "note_id": note_id,
         "xsec_token": str(item.get("xsec_token") or card.get("xsec_token") or ""),
         "xsec_source": str(item.get("xsec_source") or card.get("xsec_source") or "pc_search"),
         "type": str(card.get("type") or item.get("type") or "").lower(),
         "liked_count": parse_metric(interaction.get("liked_count", card.get("liked_count"))),
         "user_id": str(user.get("user_id") or user.get("id") or item.get("user_id") or ""),
         "nickname": str(user.get("nickname") or item.get("nickname") or ""),
+        "published_date": published,
+        "published_date_source": date_source,
     }
 
 
@@ -160,7 +235,9 @@ class FilteredXhsCrawlerMixin:
         self.scan_limit = min(50, max(20, self.collection_request.max_items * 4))
         self.seen_in_scan: set[str] = set()
         self.selected: list[dict[str, Any]] = []
-        self.author_followers: dict[str, int] = {}
+        self.author_followers: dict[str, int | None] = {}
+        self.rejected_authors: set[str] = set()
+        self.current_creator_id = ""
         self.last_missing_metric = ""
         self.consecutive_missing_metrics = 0
         self.last_request_at = 0.0
@@ -169,10 +246,13 @@ class FilteredXhsCrawlerMixin:
             "scan_limit": self.scan_limit,
             "found": 0,
             "videos": 0,
+            "non_video_filtered": 0,
             "history_skipped": 0,
             "duplicates_in_scan": 0,
             "likes_filtered": 0,
             "followers_filtered": 0,
+            "author_cards_filtered": 0,
+            "creators_checked": 0,
             "likes_missing": 0,
             "time_missing": 0,
             "followers_missing": 0,
@@ -180,7 +260,12 @@ class FilteredXhsCrawlerMixin:
             "profile_requests": 0,
             "list_requests": 0,
             "in_date_range": 0,
+            "date_filtered": 0,
+            "date_prefiltered": 0,
+            "date_detail_filtered": 0,
             "selected": 0,
+            "follower_filter_enabled": self.collection_request.min_followers is not None,
+            "trigger_type": self.collection_request.trigger_type,
         }
 
     async def _pause(self) -> None:
@@ -233,6 +318,7 @@ class FilteredXhsCrawlerMixin:
         if user_id in self.author_followers:
             return self.author_followers[user_id]
         self.stats["profile_requests"] += 1
+        self.stats["creators_checked"] += 1
         profile = await self._call(
             self.xhs_client.get_creator_info,
             user_id=user_id,
@@ -240,10 +326,25 @@ class FilteredXhsCrawlerMixin:
             xsec_source=xsec_source,
         )
         followers = extract_follower_count(profile)
-        if followers is None:
-            return None
         self.author_followers[user_id] = followers
         return followers
+
+    def _reject_author(self, user_id: str) -> None:
+        if user_id not in self.rejected_authors:
+            self.rejected_authors.add(user_id)
+            self.stats["followers_filtered"] += 1
+
+    def _list_date_is_definitely_outside(self, card: dict[str, Any]) -> bool:
+        published = card.get("published_date")
+        if not isinstance(published, date):
+            return False
+        start = self.collection_request.start_date
+        end = self.collection_request.end_date
+        if card.get("published_date_source") == "note_id":
+            # The ID date is a provisional convention rather than a documented field.
+            # Keep a one-day boundary buffer and let detail data make the final decision.
+            return published < start - timedelta(days=1) or published > end + timedelta(days=1)
+        return published < start or published > end
 
     async def _detail(self, card: dict[str, Any]) -> dict[str, Any] | None:
         self.stats["details_requested"] += 1
@@ -292,6 +393,7 @@ class FilteredXhsCrawlerMixin:
             self.stats["history_skipped"] += 1
             return
         if card["type"] and card["type"] != "video":
+            self.stats["non_video_filtered"] += 1
             return
         if card["type"] == "video":
             self.stats["videos"] += 1
@@ -299,11 +401,34 @@ class FilteredXhsCrawlerMixin:
             self._reset_missing_metric_streak()
             self.stats["likes_filtered"] += 1
             return
+        if self._list_date_is_definitely_outside(card):
+            self._reset_missing_metric_streak()
+            self.stats["date_prefiltered"] += 1
+            self.stats["date_filtered"] += 1
+            return
+
+        if self.collection_request.min_followers is not None:
+            user_id = card["user_id"] or self.current_creator_id
+            if not user_id:
+                self._skip_missing_metric("followers", "博主粉丝数")
+                return
+            followers = await self._profile_followers(
+                user_id, card["xsec_token"], card["xsec_source"]
+            )
+            if followers is None:
+                self._skip_missing_metric("followers", "博主粉丝数")
+                return
+            if followers < self.collection_request.min_followers:
+                self._reset_missing_metric_streak()
+                self._reject_author(user_id)
+                self.stats["author_cards_filtered"] += 1
+                return
 
         detail = await self._detail(card)
         if detail is None:
             return
         if str(detail.get("type") or "").lower() != "video":
+            self.stats["non_video_filtered"] += 1
             return
         if card["type"] != "video":
             self.stats["videos"] += 1
@@ -321,26 +446,19 @@ class FilteredXhsCrawlerMixin:
             self.stats["likes_filtered"] += 1
             return
         stamp = parse_metric(detail.get("time"))
-        if stamp is None:
+        if stamp is None and card.get("published_date_source") == "list":
+            published = card["published_date"]
+        elif stamp is None:
             self._skip_missing_metric("time", "发布时间")
             return
-        published = datetime.fromtimestamp(stamp / 1000 if stamp > 10_000_000_000 else stamp).date()
+        else:
+            published = datetime.fromtimestamp(stamp / 1000 if stamp > 10_000_000_000 else stamp).date()
         if not (self.collection_request.start_date <= published <= self.collection_request.end_date):
             self._reset_missing_metric_streak()
+            self.stats["date_detail_filtered"] += 1
+            self.stats["date_filtered"] += 1
             return
         self.stats["in_date_range"] += 1
-
-        if self.collection_request.min_followers is not None:
-            user = detail.get("user") if isinstance(detail.get("user"), dict) else {}
-            user_id = str(user.get("user_id") or card["user_id"] or "")
-            followers = await self._profile_followers(user_id, card["xsec_token"], card["xsec_source"])
-            if followers is None:
-                self._skip_missing_metric("followers", "粉丝数")
-                return
-            if followers < self.collection_request.min_followers:
-                self._reset_missing_metric_streak()
-                self.stats["followers_filtered"] += 1
-                return
 
         self._reset_missing_metric_streak()
         await xhs_store.update_xhs_note(detail)
@@ -419,6 +537,7 @@ class FilteredXhsCrawlerMixin:
         try:
             for creator_url in config.XHS_CREATOR_ID_LIST:
                 creator = parse_creator_info_from_url(creator_url)
+                self.current_creator_id = creator.user_id
                 if self.collection_request.min_followers is not None:
                     followers = await self._profile_followers(
                         creator.user_id, creator.xsec_token, creator.xsec_source
@@ -428,8 +547,8 @@ class FilteredXhsCrawlerMixin:
                         break
                     if followers < self.collection_request.min_followers:
                         self._reset_missing_metric_streak()
-                        self.stats["followers_filtered"] += 1
-                        print("博主粉丝数未达到筛选条件，本次无需读取作品详情", flush=True)
+                        self._reject_author(creator.user_id)
+                        print("博主粉丝数未达到筛选条件，本次不读取该博主的主页作品卡片", flush=True)
                         break
                 cursor = ""
                 while len(self.seen_in_scan) < self.scan_limit and len(self.selected) < self.collection_request.max_items:
@@ -490,7 +609,8 @@ def main() -> None:
 
     # Collection never launches or replaces a browser.  It only attaches to the exact
     # Xiaohongshu window that the explicit "确认登录" action left open.
-    existing_port = find_platform_browser("xhs", config.CDP_DEBUG_PORT)
+    expected_port = PLATFORM_CDP_PORTS["xhs"]
+    existing_port = find_platform_browser("xhs", expected_port, 1)
     if existing_port is None:
         raise RuntimeError(LOGIN_REQUIRED)
     config.CDP_CONNECT_EXISTING = True

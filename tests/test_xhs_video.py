@@ -10,17 +10,24 @@ from mvp import xhs_video
 
 def test_video_fallback_requires_and_reuses_existing_xhs_browser(monkeypatch):
     config = SimpleNamespace(CDP_DEBUG_PORT=9222)
-    monkeypatch.setattr(xhs_video, "find_platform_browser", lambda platform, port: 9227)
+    requested = []
 
-    assert xhs_video.configure_existing_xhs_browser(config) == 9227
+    def find_browser(platform, port, count):
+        requested.append((platform, port, count))
+        return port
+
+    monkeypatch.setattr(xhs_video, "find_platform_browser", find_browser)
+
+    assert xhs_video.configure_existing_xhs_browser(config) == 9333
+    assert requested == [("xhs", 9333, 1)]
     assert config.CDP_CONNECT_EXISTING is True
-    assert config.CDP_DEBUG_PORT == 9227
+    assert config.CDP_DEBUG_PORT == 9333
     assert config.AUTO_CLOSE_BROWSER is False
 
 
 def test_video_fallback_never_launches_a_replacement_browser(monkeypatch):
     config = SimpleNamespace(CDP_DEBUG_PORT=9222)
-    monkeypatch.setattr(xhs_video, "find_platform_browser", lambda platform, port: None)
+    monkeypatch.setattr(xhs_video, "find_platform_browser", lambda platform, port, count: None)
 
     with pytest.raises(RuntimeError, match="已确认登录的小红书窗口"):
         xhs_video.configure_existing_xhs_browser(config)
@@ -60,7 +67,7 @@ def test_video_fallback_detaches_without_closing_login_browser(tmp_path, monkeyp
 
         async def launch_and_connect(self, playwright, headless=False):
             assert config.CDP_CONNECT_EXISTING is True
-            assert config.CDP_DEBUG_PORT == 9222
+            assert config.CDP_DEBUG_PORT == 9333
             return context
 
         async def cleanup(self):
@@ -73,7 +80,7 @@ def test_video_fallback_detaches_without_closing_login_browser(tmp_path, monkeyp
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-    monkeypatch.setattr(xhs_video, "find_platform_browser", lambda platform, port: 9222)
+    monkeypatch.setattr(xhs_video, "find_platform_browser", lambda platform, port, count: port)
     monkeypatch.setattr(playwright.async_api, "async_playwright", FakePlaywright)
     monkeypatch.setattr(tools.cdp_browser, "CDPBrowserManager", FakeManager)
 
