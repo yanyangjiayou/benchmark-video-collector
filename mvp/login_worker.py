@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+import json
 import sys
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,13 +12,39 @@ sys.path.insert(0, str(VENDOR))
 async def noop(*args, **kwargs):
     return None
 
+
+PLATFORM_PAGE_MARKERS = {
+    "xhs": ("xiaohongshu.com", "xhscdn.com"),
+    "dy": ("douyin.com",),
+}
+
+
+def find_platform_browser(platform: str, start_port: int = 9222, port_count: int = 100) -> int | None:
+    """Return a CDP port only when its open pages belong to the requested platform."""
+    markers = PLATFORM_PAGE_MARKERS.get(platform, ())
+    for port in range(start_port, start_port + port_count):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.08) as response:
+                pages = json.load(response)
+        except (OSError, ValueError):
+            continue
+        urls = "\n".join(str(page.get("url", "")).lower() for page in pages if isinstance(page, dict))
+        if any(marker in urls for marker in markers):
+            return port
+    return None
+
 async def main(platform: str) -> None:
     import config
     config.PLATFORM = platform
     config.LOGIN_TYPE = "qrcode"
     config.ENABLE_IP_PROXY = False
     config.ENABLE_GET_COMMENTS = False
-    config.CDP_CONNECT_EXISTING = False
+    # Reuse the requested platform's browser after login. Starting a second Chrome
+    # process with the same profile makes Chrome exit immediately.
+    existing_port = find_platform_browser(platform, config.CDP_DEBUG_PORT)
+    config.CDP_CONNECT_EXISTING = existing_port is not None
+    if existing_port is not None:
+        config.CDP_DEBUG_PORT = existing_port
     if platform == "xhs":
         from media_platform.xhs import XiaoHongShuCrawler
         from .xhs_worker import strict_login_probe
@@ -57,8 +85,10 @@ async def main(platform: str) -> None:
         raise RuntimeError("登录超时，请在平台窗口完成扫码或验证后重试") from exc
     finally:
         manager = getattr(crawler, "cdp_manager", None)
-        if manager:
+        if manager is not None and not config.CDP_CONNECT_EXISTING:
             await manager.cleanup(force=True)
+        elif manager is None and getattr(crawler, "browser_context", None):
+            await crawler.browser_context.close()
 
 if __name__ == "__main__":
     asyncio.run(main(sys.argv[1]))
