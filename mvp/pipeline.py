@@ -100,6 +100,7 @@ def find_media(raw: Path, platform: str, item_id: str) -> Path | None:
                 return media
     return None
 
+
 def read_rows(raw: Path, platform: str) -> list[dict]:
     files = sorted(path for name in (["douyin", "dy"] if platform == "dy" else [platform])
                    for path in (raw / name / "jsonl").glob("*_contents_*.jsonl"))
@@ -157,7 +158,10 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     elif request.platform == "dy":
         cmd[1:2] = ["-m", "mvp.crawler_worker"]
     if request.platform == "xhs":
-        log(f"正在按列表指标自动预筛选，最多扫描 {scan_limit} 条；不会在采集过程中自动重新登录。")
+        log(
+            f"正在按列表指标自动预筛选，最多扫描 {scan_limit} 条；"
+            "只复用已确认登录的小红书窗口，不会在采集过程中打开、关闭或重新登录。"
+        )
     else:
         log("正在使用专用浏览器配置检查登录会话；仅在登录失效时需要扫码。")
     env = {**os.environ, "PYTHONPATH": str(ROOT), "MPLCONFIGDIR": str(ROOT / "runtime/matplotlib"), "UV_CACHE_DIR": str(ROOT / "runtime/uv-cache")}
@@ -175,7 +179,7 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
                     logfile.flush()
                     log(clean_line)
                     if any(marker in clean_line for marker in (
-                        "ERROR", "Error:", "Exception:", "failed", "login qrcode not found",
+                        "ERROR", "Error:", "Exception:", "login qrcode not found",
                         "MVP_DOUYIN_LOGIN_REQUIRED", "MVP_XHS_",
                     )):
                         errors.append(clean_line)
@@ -185,18 +189,6 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
             process_observer(None)
     if cancel_event is not None and getattr(cancel_event, "is_set")():
         raise JobCancelled("采集已由用户停止")
-    if code:
-        if any("MVP_DOUYIN_LOGIN_REQUIRED" in line for line in errors):
-            raise RuntimeError("抖音登录已失效，请点击“确认登录”并在抖音窗口重新扫码")
-        if any("MVP_XHS_ACCESS_RESTRICTED" in line for line in errors):
-            raise RuntimeError("小红书返回操作频繁、安全验证或访问限制；任务已立即停止，且没有自动重试或重新登录")
-        if any("MVP_XHS_LOGIN_REQUIRED" in line for line in errors):
-            raise RuntimeError("小红书登录已失效；任务已停止，没有在采集过程中自动打开登录页")
-        if any("MVP_XHS_METRIC_UNAVAILABLE" in line for line in errors):
-            raise RuntimeError("小红书未返回可核验的点赞数、粉丝数或发布时间；为避免错误筛选，本次没有把不确定内容导出")
-        if any("MVP_XHS_LOGIN_CHECK_FAILED" in line for line in errors):
-            raise RuntimeError("小红书登录状态检查请求异常；任务已停止且没有自动重新登录，请稍后再试")
-        raise RuntimeError(f"采集失败（退出代码 {code}），请查看运行记录。详细日志已保存在本机。")
     worker_stats: dict = {}
     stats_path = raw.parent / "xhs_scan_summary.json"
     if request.platform == "xhs" and stats_path.is_file():
@@ -204,6 +196,32 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
             worker_stats = json.loads(stats_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             worker_stats = {}
+    if code:
+        if worker_stats and progress:
+            progress({
+                "stage": "采集阶段已停止",
+                "found": int(worker_stats.get("found", 0)),
+                "details_requested": int(worker_stats.get("details_requested", 0)),
+                "likes_filtered": int(worker_stats.get("likes_filtered", 0)),
+                "followers_filtered": int(worker_stats.get("followers_filtered", 0)),
+                "history_skipped": int(worker_stats.get("history_skipped", 0)),
+                "metric_missing_skipped": sum(
+                    int(worker_stats.get(key, 0))
+                    for key in ("likes_missing", "time_missing", "followers_missing")
+                ),
+                "eligible": int(worker_stats.get("selected", 0)),
+            })
+        if any("MVP_DOUYIN_LOGIN_REQUIRED" in line for line in errors):
+            raise RuntimeError("抖音登录已失效，请点击“确认登录”并在抖音窗口重新扫码")
+        if any("MVP_XHS_ACCESS_RESTRICTED" in line for line in errors):
+            raise RuntimeError("小红书返回操作频繁、安全验证或访问限制；任务已立即停止，且没有自动重试或重新登录")
+        if any("MVP_XHS_LOGIN_REQUIRED" in line for line in errors):
+            raise RuntimeError("小红书登录态未就绪；任务已停止，未在后台自动打开登录页。请先点击「确认登录」并完成扫码，保持浏览器窗口不关闭，再重新采集")
+        if any("MVP_XHS_METRIC_UNAVAILABLE" in line for line in errors):
+            raise RuntimeError("小红书未返回可核验的点赞数、粉丝数或发布时间；为避免错误筛选，本次没有把不确定内容导出")
+        if any("MVP_XHS_LOGIN_CHECK_FAILED" in line for line in errors):
+            raise RuntimeError("小红书登录状态检查请求异常；任务已停止且没有自动重新登录，请稍后再试")
+        raise RuntimeError(f"采集失败（退出代码 {code}），请查看运行记录。详细日志已保存在本机。")
     all_rows = read_rows(raw, request.platform)
     if not all_rows and errors:
         raise RuntimeError("平台未返回内容，运行记录中有登录或请求错误；请确认主页链接，并重新确认登录后重试。")
@@ -217,6 +235,10 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     candidates, selection = select_new_candidates(eligible_rows, request.platform, request.max_items, history)
     history_skipped = selection["history_skipped"] + int(worker_stats.get("history_skipped", 0))
     duplicates_in_scan = selection["duplicates_in_scan"] + int(worker_stats.get("duplicates_in_scan", 0))
+    likes_missing = int(worker_stats.get("likes_missing", 0))
+    time_missing = int(worker_stats.get("time_missing", 0))
+    followers_missing = int(worker_stats.get("followers_missing", 0))
+    metric_missing_skipped = likes_missing + time_missing + followers_missing
     summary = {"found": int(worker_stats.get("found", len(all_rows))),
                "videos": int(worker_stats.get("videos", len(video_rows))),
                "in_date_range": int(worker_stats.get("in_date_range", len(date_rows))),
@@ -224,6 +246,10 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
                "duplicates_in_scan": duplicates_in_scan, "content_duplicates": 0,
                "likes_filtered": int(worker_stats.get("likes_filtered", 0)),
                "followers_filtered": int(worker_stats.get("followers_filtered", 0)),
+               "likes_missing": likes_missing,
+               "time_missing": time_missing,
+               "followers_missing": followers_missing,
+               "metric_missing_skipped": metric_missing_skipped,
                "details_requested": int(worker_stats.get("details_requested", len(all_rows) if request.platform == "xhs" else 0)),
                "profile_requests": int(worker_stats.get("profile_requests", 0)),
                "list_requests": int(worker_stats.get("list_requests", 0)),
@@ -236,6 +262,12 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
         log(f"列表点赞数预筛选已排除 {summary['likes_filtered']} 条，无需打开这些详情")
     if summary["followers_filtered"]:
         log(f"粉丝数筛选已排除 {summary['followers_filtered']} 个候选")
+    if metric_missing_skipped:
+        log(
+            f"有 {metric_missing_skipped} 条因平台未返回可核验指标而跳过"
+            f"（点赞 {likes_missing}、发布时间 {time_missing}、粉丝 {followers_missing}）；"
+            "这些不确定内容没有导出，任务继续处理其余内容"
+        )
     if history_skipped:
         log(f"已根据持久化采集标记跳过 {history_skipped} 条历史内容")
     if duplicates_in_scan:

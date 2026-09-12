@@ -97,6 +97,46 @@ def test_xhs_access_restriction_stops_with_clear_message(tmp_path, monkeypatch):
         pipeline.run_job(xhs_request(), "", lambda message: None)
 
 
+def test_xhs_failure_keeps_scan_counts_visible(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    updates = []
+
+    def popen(*args, **kwargs):
+        job = next((tmp_path / "runtime" / "jobs").iterdir())
+        (job / "xhs_scan_summary.json").write_text(
+            '{"found": 3, "details_requested": 3, "likes_missing": 3, "selected": 0}',
+            encoding="utf-8",
+        )
+        return FakeCrawler("RuntimeError: MVP_XHS_METRIC_UNAVAILABLE\n", code=1)
+
+    monkeypatch.setattr(pipeline.subprocess, "Popen", popen)
+    with pytest.raises(RuntimeError, match="未返回可核验"):
+        pipeline.run_job(xhs_request(), "", lambda message: None, progress=updates.append)
+
+    assert updates[-1]["found"] == 3
+    assert updates[-1]["details_requested"] == 3
+    assert updates[-1]["metric_missing_skipped"] == 3
+
+
+def test_recovered_cdp_connection_warning_is_not_a_failed_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    output = (
+        "WARNING Direct existing-browser CDP connection failed; Trying /json/version discovery\n"
+        "INFO Successfully connected to to browser\n"
+    )
+    monkeypatch.setattr(
+        pipeline.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeCrawler(output, code=0),
+    )
+
+    result, summary, rows = pipeline.run_job(xhs_request(), "", lambda message: None)
+
+    assert result.is_file()
+    assert summary["exported"] == 0
+    assert rows == []
+
+
 def test_douyin_image_post_audio_is_not_a_video():
     assert not pipeline.is_video({"video_download_url": "audio.mp4", "note_download_url": "photo.jpeg"}, "dy")
     assert pipeline.is_video({"video_download_url": "video.mp4", "note_download_url": ""}, "dy")

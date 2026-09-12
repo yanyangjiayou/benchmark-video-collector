@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from .login_worker import find_platform_browser
+
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "MediaCrawler"
 
@@ -15,6 +17,24 @@ VENDOR = ROOT / "vendor" / "MediaCrawler"
 def _looks_like_video(url: str) -> bool:
     value = url.lower()
     return url.startswith("http") and ("sns-video" in value or ".mp4" in value or "/stream/" in value)
+
+
+def configure_existing_xhs_browser(config: object) -> int:
+    """Require and reuse the browser created by the explicit login step."""
+    start_port = int(getattr(config, "CDP_DEBUG_PORT", 9222))
+    existing_port = find_platform_browser("xhs", start_port)
+    if existing_port is None:
+        raise RuntimeError("补取视频需要已确认登录的小红书窗口；请重新确认登录后再试")
+    config.CDP_CONNECT_EXISTING = True
+    config.CDP_DEBUG_PORT = existing_port
+    config.AUTO_CLOSE_BROWSER = False
+    return existing_port
+
+
+def detach_existing_browser(manager: object) -> None:
+    """Drop Playwright references without closing the persistent login browser."""
+    manager.browser_context = None
+    manager.browser = None
 
 
 async def _download(items: list[dict], raw: Path, log: Callable[[str], None]) -> dict[str, Path]:
@@ -25,11 +45,12 @@ async def _download(items: list[dict], raw: Path, log: Callable[[str], None]) ->
 
     config.PLATFORM = "xhs"
     config.SAVE_LOGIN_STATE = True
-    config.CDP_CONNECT_EXISTING = False
+    configure_existing_xhs_browser(config)
     manager = CDPBrowserManager()
     downloaded: dict[str, Path] = {}
     async with async_playwright() as playwright:
         context = await manager.launch_and_connect(playwright, headless=False)
+        page = None
         try:
             cookies = await context.cookies(["https://www.xiaohongshu.com"])
             if not any(cookie.get("name") == "web_session" and cookie.get("value") for cookie in cookies):
@@ -112,7 +133,11 @@ async def _download(items: list[dict], raw: Path, log: Callable[[str], None]) ->
                 finally:
                     page.remove_listener("response", remember)
         finally:
-            await manager.cleanup()
+            try:
+                if page is not None and not page.is_closed():
+                    await page.close()
+            finally:
+                detach_existing_browser(manager)
     return downloaded
 
 

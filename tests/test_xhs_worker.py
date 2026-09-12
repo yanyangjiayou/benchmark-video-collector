@@ -3,6 +3,8 @@ from datetime import datetime
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from mvp.history import CollectionHistory
 from mvp.rules import CollectionRequest
 from mvp.xhs_worker import (
@@ -117,6 +119,8 @@ def test_list_filter_avoids_detail_for_low_likes_and_history(tmp_path, monkeypat
     crawler.seen_in_scan = set()
     crawler.selected = []
     crawler.author_followers = {}
+    crawler.last_missing_metric = ""
+    crawler.consecutive_missing_metrics = 0
     crawler.last_request_at = 0.0
     crawler.request_pause_min = crawler.request_pause_max = 0
     crawler.xhs_client = Client()
@@ -124,6 +128,7 @@ def test_list_filter_avoids_detail_for_low_likes_and_history(tmp_path, monkeypat
         "found": 0, "videos": 0, "history_skipped": 0, "duplicates_in_scan": 0,
         "likes_filtered": 0, "followers_filtered": 0, "details_requested": 0,
         "profile_requests": 0, "in_date_range": 0,
+        "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
     }
 
     async def exercise():
@@ -139,3 +144,69 @@ def test_list_filter_avoids_detail_for_low_likes_and_history(tmp_path, monkeypat
     assert crawler.stats["history_skipped"] == 1
     assert crawler.selected[0]["note_id"] == "new"
     assert stored == ["new"]
+
+
+def test_missing_detail_likes_falls_back_to_verified_list_value(tmp_path, monkeypatch):
+    stored = []
+
+    async def store_note(item):
+        stored.append(item["note_id"])
+
+    xhs_store = SimpleNamespace(
+        update_xhs_note=store_note,
+        get_video_url_arr=lambda item: [],
+        update_xhs_note_video=lambda *args: None,
+    )
+    monkeypatch.setitem(sys.modules, "store", SimpleNamespace(xhs=xhs_store))
+    now = int(datetime.now().timestamp() * 1000)
+
+    class Client:
+        async def get_note_by_id(self, note_id, source, token):
+            return {
+                "note_id": note_id,
+                "type": "video",
+                "time": now,
+                "interact_info": {},
+                "user": {"user_id": "author-1"},
+            }
+
+    crawler = FilteredXhsCrawlerMixin()
+    crawler.collection_request = CollectionRequest(
+        platform="xhs", trigger_type="keyword", keywords=["测试"], min_likes=350, max_items=2
+    )
+    crawler.history = CollectionHistory(tmp_path / "history.sqlite3")
+    crawler.seen_in_scan = set()
+    crawler.selected = []
+    crawler.author_followers = {}
+    crawler.last_missing_metric = ""
+    crawler.consecutive_missing_metrics = 0
+    crawler.last_request_at = 0.0
+    crawler.request_pause_min = crawler.request_pause_max = 0
+    crawler.xhs_client = Client()
+    crawler.stats = {
+        "found": 0, "videos": 0, "history_skipped": 0, "duplicates_in_scan": 0,
+        "likes_filtered": 0, "followers_filtered": 0, "details_requested": 0,
+        "profile_requests": 0, "in_date_range": 0,
+        "likes_missing": 0, "time_missing": 0, "followers_missing": 0,
+    }
+
+    asyncio.run(crawler._consider({
+        "id": "fallback",
+        "note_card": {"type": "video", "interact_info": {"liked_count": "500"}},
+    }))
+
+    assert stored == ["fallback"]
+    assert crawler.stats["likes_missing"] == 0
+
+
+def test_one_missing_metric_is_skipped_but_three_consecutive_stop():
+    crawler = FilteredXhsCrawlerMixin()
+    crawler.stats = {"likes_missing": 0, "time_missing": 0, "followers_missing": 0}
+    crawler.last_missing_metric = ""
+    crawler.consecutive_missing_metrics = 0
+
+    crawler._skip_missing_metric("likes", "点赞数")
+    crawler._skip_missing_metric("likes", "点赞数")
+    with pytest.raises(RuntimeError, match="连续 3 条"):
+        crawler._skip_missing_metric("likes", "点赞数")
+    assert crawler.stats["likes_missing"] == 3

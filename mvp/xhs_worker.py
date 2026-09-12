@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "MediaCrawler"
 sys.path.insert(0, str(VENDOR))
 
+from .login_worker import find_platform_browser
+
 ACCESS_RESTRICTED = "MVP_XHS_ACCESS_RESTRICTED"
 LOGIN_REQUIRED = "MVP_XHS_LOGIN_REQUIRED"
 METRIC_UNAVAILABLE = "MVP_XHS_METRIC_UNAVAILABLE"
@@ -159,6 +161,8 @@ class FilteredXhsCrawlerMixin:
         self.seen_in_scan: set[str] = set()
         self.selected: list[dict[str, Any]] = []
         self.author_followers: dict[str, int] = {}
+        self.last_missing_metric = ""
+        self.consecutive_missing_metrics = 0
         self.last_request_at = 0.0
         self.stats: dict[str, Any] = {
             "strategy": "list_first",
@@ -169,6 +173,9 @@ class FilteredXhsCrawlerMixin:
             "duplicates_in_scan": 0,
             "likes_filtered": 0,
             "followers_filtered": 0,
+            "likes_missing": 0,
+            "time_missing": 0,
+            "followers_missing": 0,
             "details_requested": 0,
             "profile_requests": 0,
             "list_requests": 0,
@@ -197,11 +204,32 @@ class FilteredXhsCrawlerMixin:
         path = self.raw.parent / "xhs_scan_summary.json"
         path.write_text(json.dumps(self.stats, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _reset_missing_metric_streak(self) -> None:
+        self.last_missing_metric = ""
+        self.consecutive_missing_metrics = 0
+
+    def _skip_missing_metric(self, metric: str, label: str) -> None:
+        """Skip one uncertain item, but stop if the same response defect repeats."""
+        self.stats[f"{metric}_missing"] += 1
+        if self.last_missing_metric == metric:
+            self.consecutive_missing_metrics += 1
+        else:
+            self.last_missing_metric = metric
+            self.consecutive_missing_metrics = 1
+        print(
+            f"指标缺失跳过：当前作品未返回可核验的{label}，不会导出；继续检查后续内容",
+            flush=True,
+        )
+        if self.consecutive_missing_metrics >= 3:
+            raise RuntimeError(
+                f"{METRIC_UNAVAILABLE}: 连续 3 条候选内容缺少可核验的{label}，已停止后续请求"
+            )
+
     async def _profile_followers(
         self, user_id: str, xsec_token: str = "", xsec_source: str = ""
-    ) -> int:
+    ) -> int | None:
         if not user_id:
-            raise RuntimeError(f"{METRIC_UNAVAILABLE}: 缺少作者标识，无法核验粉丝数")
+            return None
         if user_id in self.author_followers:
             return self.author_followers[user_id]
         self.stats["profile_requests"] += 1
@@ -213,7 +241,7 @@ class FilteredXhsCrawlerMixin:
         )
         followers = extract_follower_count(profile)
         if followers is None:
-            raise RuntimeError(f"{METRIC_UNAVAILABLE}: 平台未返回可核验的粉丝数")
+            return None
         self.author_followers[user_id] = followers
         return followers
 
@@ -268,6 +296,7 @@ class FilteredXhsCrawlerMixin:
         if card["type"] == "video":
             self.stats["videos"] += 1
         if card["liked_count"] is not None and card["liked_count"] < self.collection_request.min_likes:
+            self._reset_missing_metric_streak()
             self.stats["likes_filtered"] += 1
             return
 
@@ -281,15 +310,23 @@ class FilteredXhsCrawlerMixin:
         interactions = detail.get("interact_info") if isinstance(detail.get("interact_info"), dict) else {}
         likes = parse_metric(interactions.get("liked_count"))
         if likes is None:
-            raise RuntimeError(f"{METRIC_UNAVAILABLE}: 平台未返回可核验的点赞数")
+            # 详情接口偶发缺字段时，回退到列表阶段已核验的 liked_count
+            # （预筛已用它验证 >= min_likes，是可信任的同一来源数据）
+            likes = card.get("liked_count")
+            if likes is None:
+                self._skip_missing_metric("likes", "点赞数")
+                return
         if likes < self.collection_request.min_likes:
+            self._reset_missing_metric_streak()
             self.stats["likes_filtered"] += 1
             return
         stamp = parse_metric(detail.get("time"))
         if stamp is None:
-            raise RuntimeError(f"{METRIC_UNAVAILABLE}: 平台未返回可核验的发布时间")
+            self._skip_missing_metric("time", "发布时间")
+            return
         published = datetime.fromtimestamp(stamp / 1000 if stamp > 10_000_000_000 else stamp).date()
         if not (self.collection_request.start_date <= published <= self.collection_request.end_date):
+            self._reset_missing_metric_streak()
             return
         self.stats["in_date_range"] += 1
 
@@ -297,10 +334,15 @@ class FilteredXhsCrawlerMixin:
             user = detail.get("user") if isinstance(detail.get("user"), dict) else {}
             user_id = str(user.get("user_id") or card["user_id"] or "")
             followers = await self._profile_followers(user_id, card["xsec_token"], card["xsec_source"])
+            if followers is None:
+                self._skip_missing_metric("followers", "粉丝数")
+                return
             if followers < self.collection_request.min_followers:
+                self._reset_missing_metric_streak()
                 self.stats["followers_filtered"] += 1
                 return
 
+        self._reset_missing_metric_streak()
         await xhs_store.update_xhs_note(detail)
         await self._download_selected_video(detail)
         self.selected.append(detail)
@@ -361,6 +403,17 @@ class FilteredXhsCrawlerMixin:
         from var import source_keyword_var
 
         self._prepare_job()
+        # 前置登录态自检：在真正发起采集前确认浏览器连通且登录态有效。
+        # 浏览器断连/登录失效会在这一步暴露，而不是走到详情阶段才因缺字段崩溃。
+        probe = getattr(self.xhs_client, "pong", None)
+        if callable(probe):
+            try:
+                if not await probe():
+                    raise RuntimeError(LOGIN_REQUIRED)
+            except RuntimeError as exc:
+                if any(token in str(exc) for token in (ACCESS_RESTRICTED, LOGIN_REQUIRED, "LOGIN_CHECK_FAILED")):
+                    raise
+                raise RuntimeError(LOGIN_REQUIRED) from exc
         config.ENABLE_GET_MEIDAS = False
         source_keyword_var.set("")
         try:
@@ -370,7 +423,11 @@ class FilteredXhsCrawlerMixin:
                     followers = await self._profile_followers(
                         creator.user_id, creator.xsec_token, creator.xsec_source
                     )
+                    if followers is None:
+                        self._skip_missing_metric("followers", "粉丝数")
+                        break
                     if followers < self.collection_request.min_followers:
+                        self._reset_missing_metric_streak()
                         self.stats["followers_filtered"] += 1
                         print("博主粉丝数未达到筛选条件，本次无需读取作品详情", flush=True)
                         break
@@ -431,13 +488,35 @@ def main() -> None:
             client.pong = strict_pong
             return client
 
+    # Collection never launches or replaces a browser.  It only attaches to the exact
+    # Xiaohongshu window that the explicit "确认登录" action left open.
+    existing_port = find_platform_browser("xhs", config.CDP_DEBUG_PORT)
+    if existing_port is None:
+        raise RuntimeError(LOGIN_REQUIRED)
+    config.CDP_CONNECT_EXISTING = True
+    config.CDP_DEBUG_PORT = existing_port
+    config.AUTO_CLOSE_BROWSER = False
     config.ENABLE_GET_MEIDAS = False
     config.ENABLE_GET_COMMENTS = False
     config.ENABLE_GET_SUB_COMMENTS = False
     config.MAX_CONCURRENCY_NUM = 1
     xhs_core.XiaoHongShuLogin = NoAutomaticLogin
     vendor_main.CrawlerFactory.CRAWLERS["xhs"] = FilteredXhsCrawler
-    run(vendor_main.main, vendor_main.async_cleanup)
+
+    original_cleanup = vendor_main.async_cleanup
+
+    async def detach_without_closing_login_browser() -> None:
+        """Release Playwright references without closing the user-visible login window."""
+        crawler = vendor_main.crawler
+        manager = getattr(crawler, "cdp_manager", None) if crawler else None
+        if manager is not None and config.CDP_CONNECT_EXISTING:
+            manager.browser_context = None
+            manager.browser = None
+            crawler.browser_context = None
+            crawler.context_page = None
+        await original_cleanup()
+
+    run(vendor_main.main, detach_without_closing_login_browser)
 
 
 if __name__ == "__main__":

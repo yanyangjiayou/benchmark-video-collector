@@ -10,7 +10,8 @@ build/
 # 登录态、运行数据与输出
 browser_data/
 runtime/
-output/
+output/*
+!output/README.md
 data/
 logs/
 *.log
@@ -28,6 +29,7 @@ logs/
 *.pem
 *.key
 # 缓存与系统文件
+.workbuddy/
 __pycache__/
 *.py[cod]
 .pytest_cache/
