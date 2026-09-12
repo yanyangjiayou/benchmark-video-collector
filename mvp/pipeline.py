@@ -15,6 +15,10 @@ from .xhs_video import download_missing_videos
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "MediaCrawler"
 
+
+class JobCancelled(RuntimeError):
+    """Raised when the user stops an active collection."""
+
 def resolve_creator_url(url: str, platform: str) -> str:
     url = normalize_creator_url(url, platform)
     if not any(host in url for host in ("xhslink.cn", "xhslink.com", "v.douyin.com")):
@@ -125,7 +129,10 @@ def export_excel(rows: list[dict], path: Path) -> None:
 def run_job(request: CollectionRequest, account_label: str, log: Callable[[str], None],
             progress: Callable[[dict], None] | None = None,
             on_records: Callable[[list[dict]], None] | None = None,
-            model_name: str = "small", glossary: str = "") -> tuple[Path, dict, list[dict]]:
+            model_name: str = "small", glossary: str = "",
+            cancel_event: object | None = None,
+            process_observer: Callable[[subprocess.Popen | None], None] | None = None,
+            ) -> tuple[Path, dict, list[dict]]:
     job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     raw = ROOT / "runtime" / "jobs" / job_id / "raw"
     raw.mkdir(parents=True)
@@ -136,35 +143,67 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     imported = history.import_excel_exports(ROOT / "output")
     if imported:
         log(f"已从旧 Excel 结果导入 {imported} 条历史采集标记")
+    scan_limit = min(50, max(20, request.max_items * 4))
     cmd = [sys.executable, "main.py", "--platform", request.platform, "--lt", "qrcode",
-           "--save_data_option", "jsonl", "--save_data_path", str(raw), "--crawler_max_notes_count", "50",
+           "--save_data_option", "jsonl", "--save_data_path", str(raw), "--crawler_max_notes_count", str(scan_limit),
            "--max_concurrency_num", "1", "--get_comment", "false", "--get_sub_comment", "false",
            "--enable_ip_proxy", "false"]
     if request.trigger_type == "creator_url":
         cmd += ["--type", "creator", "--creator_id", resolve_creator_url(request.creator_url, request.platform)]
     else:
         cmd += ["--type", "search", "--keywords", ",".join(request.keywords)]
-    if request.platform == "dy":
+    if request.platform == "xhs":
+        cmd[1:2] = ["-m", "mvp.xhs_worker"]
+    elif request.platform == "dy":
         cmd[1:2] = ["-m", "mvp.crawler_worker"]
-    log("正在使用专用浏览器配置检查登录会话；仅在登录失效时需要扫码。")
+    if request.platform == "xhs":
+        log(f"正在按列表指标自动预筛选，最多扫描 {scan_limit} 条；不会在采集过程中自动重新登录。")
+    else:
+        log("正在使用专用浏览器配置检查登录会话；仅在登录失效时需要扫码。")
     env = {**os.environ, "PYTHONPATH": str(ROOT), "MPLCONFIGDIR": str(ROOT / "runtime/matplotlib"), "UV_CACHE_DIR": str(ROOT / "runtime/uv-cache")}
     process = subprocess.Popen(cmd, cwd=VENDOR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace")
+    if process_observer:
+        process_observer(process)
     errors: list[str] = []
-    with (raw.parent / "crawler.log").open("w", encoding="utf-8") as logfile:
-        for line in iter(process.stdout.readline, ""):
-            if line.strip():
-                clean_line = re.sub(r"(?i)(cookie|authorization|xsec_token|mstoken)(['\"]?\s*[:=]\s*)[^\n]+", r"\1\2[已隐藏]", line.strip())
-                logfile.write(clean_line + "\n")
-                logfile.flush()
-                log(clean_line)
-                if any(marker in clean_line for marker in ("ERROR", "Error:", "Exception:", "failed", "login qrcode not found", "MVP_DOUYIN_LOGIN_REQUIRED")):
-                    errors.append(clean_line)
-    code = process.wait()
+    try:
+        with (raw.parent / "crawler.log").open("w", encoding="utf-8") as logfile:
+            for line in iter(process.stdout.readline, ""):
+                if line.strip():
+                    clean_line = re.sub(r"(?i)(cookie|authorization|xsec_token|mstoken)(['\"]?\s*[:=]\s*)[^\n]+", r"\1\2[已隐藏]", line.strip())
+                    logfile.write(clean_line + "\n")
+                    logfile.flush()
+                    log(clean_line)
+                    if any(marker in clean_line for marker in (
+                        "ERROR", "Error:", "Exception:", "failed", "login qrcode not found",
+                        "MVP_DOUYIN_LOGIN_REQUIRED", "MVP_XHS_",
+                    )):
+                        errors.append(clean_line)
+        code = process.wait()
+    finally:
+        if process_observer:
+            process_observer(None)
+    if cancel_event is not None and getattr(cancel_event, "is_set")():
+        raise JobCancelled("采集已由用户停止")
     if code:
         if any("MVP_DOUYIN_LOGIN_REQUIRED" in line for line in errors):
             raise RuntimeError("抖音登录已失效，请点击“确认登录”并在抖音窗口重新扫码")
+        if any("MVP_XHS_ACCESS_RESTRICTED" in line for line in errors):
+            raise RuntimeError("小红书返回操作频繁、安全验证或访问限制；任务已立即停止，且没有自动重试或重新登录")
+        if any("MVP_XHS_LOGIN_REQUIRED" in line for line in errors):
+            raise RuntimeError("小红书登录已失效；任务已停止，没有在采集过程中自动打开登录页")
+        if any("MVP_XHS_METRIC_UNAVAILABLE" in line for line in errors):
+            raise RuntimeError("小红书未返回可核验的点赞数、粉丝数或发布时间；为避免错误筛选，本次没有把不确定内容导出")
+        if any("MVP_XHS_LOGIN_CHECK_FAILED" in line for line in errors):
+            raise RuntimeError("小红书登录状态检查请求异常；任务已停止且没有自动重新登录，请稍后再试")
         raise RuntimeError(f"采集失败（退出代码 {code}），请查看运行记录。详细日志已保存在本机。")
+    worker_stats: dict = {}
+    stats_path = raw.parent / "xhs_scan_summary.json"
+    if request.platform == "xhs" and stats_path.is_file():
+        try:
+            worker_stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            worker_stats = {}
     all_rows = read_rows(raw, request.platform)
     if not all_rows and errors:
         raise RuntimeError("平台未返回内容，运行记录中有登录或请求错误；请确认主页链接，并重新确认登录后重试。")
@@ -176,16 +215,27 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
         reverse=True,
     )
     candidates, selection = select_new_candidates(eligible_rows, request.platform, request.max_items, history)
-    history_skipped = selection["history_skipped"]
-    duplicates_in_scan = selection["duplicates_in_scan"]
-    summary = {"found": len(all_rows), "videos": len(video_rows), "in_date_range": len(date_rows),
+    history_skipped = selection["history_skipped"] + int(worker_stats.get("history_skipped", 0))
+    duplicates_in_scan = selection["duplicates_in_scan"] + int(worker_stats.get("duplicates_in_scan", 0))
+    summary = {"found": int(worker_stats.get("found", len(all_rows))),
+               "videos": int(worker_stats.get("videos", len(video_rows))),
+               "in_date_range": int(worker_stats.get("in_date_range", len(date_rows))),
                "eligible_total": selection["eligible_total"], "eligible": len(candidates), "history_skipped": history_skipped,
                "duplicates_in_scan": duplicates_in_scan, "content_duplicates": 0,
+               "likes_filtered": int(worker_stats.get("likes_filtered", 0)),
+               "followers_filtered": int(worker_stats.get("followers_filtered", 0)),
+               "details_requested": int(worker_stats.get("details_requested", len(all_rows) if request.platform == "xhs" else 0)),
+               "profile_requests": int(worker_stats.get("profile_requests", 0)),
+               "list_requests": int(worker_stats.get("list_requests", 0)),
                "transcribed": 0, "media_missing": 0, "transcribe_errors": 0, "exported": 0,
                "stage": "筛选完成", "estimated_total_seconds": 90 + len(candidates) * (75 if model_name == "small" else 130)}
     if progress:
         progress(summary)
-    log(f"筛选结果：发现 {len(all_rows)} 条，其中视频 {len(video_rows)} 条，日期范围内 {len(date_rows)} 条，本次新采集 {len(candidates)} 条")
+    log(f"筛选结果：扫描 {summary['found']} 条，只请求了 {summary['details_requested']} 条详情，本次新采集 {len(candidates)} 条")
+    if summary["likes_filtered"]:
+        log(f"列表点赞数预筛选已排除 {summary['likes_filtered']} 条，无需打开这些详情")
+    if summary["followers_filtered"]:
+        log(f"粉丝数筛选已排除 {summary['followers_filtered']} 个候选")
     if history_skipped:
         log(f"已根据持久化采集标记跳过 {history_skipped} 条历史内容")
     if duplicates_in_scan:
@@ -193,6 +243,8 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     if selection["missing_ids"]:
         log(f"已跳过 {selection['missing_ids']} 条缺少内容 ID 的记录")
     if request.platform == "xhs" and candidates:
+        if cancel_event is not None and getattr(cancel_event, "is_set")():
+            raise JobCancelled("采集已由用户停止")
         missing = [item for item in candidates if find_media(raw, request.platform, content_id(item, request.platform)) is None]
         if missing:
             summary["stage"] = "正在取得视频文件"
@@ -238,6 +290,8 @@ def run_job(request: CollectionRequest, account_label: str, log: Callable[[str],
     results: list[dict] = []
     history_entries: list[dict[str, str]] = []
     for index, (item, media, file_hash) in enumerate(prepared, 1):
+        if cancel_event is not None and getattr(cancel_event, "is_set")():
+            raise JobCancelled("采集已由用户停止")
         item_id = content_id(item, request.platform)
         log(f"正在转写 {index}/{len(prepared)}：{item.get('title', '')[:30]}")
         summary.update(stage=f"正在转写第 {index}/{len(prepared)} 条", current=index)

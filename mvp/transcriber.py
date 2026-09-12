@@ -29,11 +29,14 @@ class LocalTranscriber:
         path = Path(media_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
+        fast_mode = self.model_name == "small"
         segments, _ = self.load().transcribe(
             str(path),
             language="zh",
             vad_filter=True,
-            beam_size=5,
+            beam_size=1 if fast_mode else 5,
+            best_of=1 if fast_mode else 5,
+            condition_on_previous_text=False,
             initial_prompt=initial_prompt or None,
         )
         return "".join(self._clean(segment.text) for segment in segments).strip()

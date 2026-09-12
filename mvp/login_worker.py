@@ -19,7 +19,19 @@ async def main(platform: str) -> None:
     config.CDP_CONNECT_EXISTING = False
     if platform == "xhs":
         from media_platform.xhs import XiaoHongShuCrawler
-        crawler = XiaoHongShuCrawler()
+        from .xhs_worker import strict_login_probe
+
+        class SafeLoginXhsCrawler(XiaoHongShuCrawler):
+            async def create_xhs_client(self, httpx_proxy):
+                client = await super().create_xhs_client(httpx_proxy)
+
+                async def strict_pong() -> bool:
+                    return await strict_login_probe(client)
+
+                client.pong = strict_pong
+                return client
+
+        crawler = SafeLoginXhsCrawler()
         crawler.search = noop
         crawler.get_specified_notes = noop
         crawler.get_creators_and_notes = noop

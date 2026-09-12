@@ -44,6 +44,7 @@ class CollectionRequest(BaseModel):
             "开始日期": self.start_date.isoformat(),
             "结束日期": self.end_date.isoformat(),
             "最低点赞": self.min_likes,
+            "最低粉丝": self.min_followers if self.min_followers is not None else "不限制",
             "最多条数": self.max_items,
             "仅视频": self.video_only,
             "本地转写": self.transcribe_video,

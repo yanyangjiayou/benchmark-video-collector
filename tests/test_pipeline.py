@@ -24,6 +24,15 @@ def request():
                              creator_url="https://www.douyin.com/user/MS4wLjABAAAAexample")
 
 
+def xhs_request(max_items=5):
+    return CollectionRequest(
+        platform="xhs",
+        trigger_type="creator_url",
+        creator_url="https://www.xiaohongshu.com/user/profile/abc",
+        max_items=max_items,
+    )
+
+
 def test_duplicate_only_batch_remembers_creator(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "ROOT", tmp_path)
     monkeypatch.setattr(pipeline.subprocess, "Popen", lambda *args, **kwargs: FakeCrawler())
@@ -60,6 +69,32 @@ def test_crawler_subprocess_reuses_current_python(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, "Popen", popen)
     pipeline.run_job(request(), "", lambda message: None)
     assert observed["command"][0] == "C:\\video-collector\\.venv\\Scripts\\python.exe"
+
+
+def test_xhs_uses_bounded_list_first_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    observed = {}
+
+    def popen(command, *args, **kwargs):
+        observed["command"] = command
+        return FakeCrawler()
+
+    monkeypatch.setattr(pipeline.subprocess, "Popen", popen)
+    pipeline.run_job(xhs_request(5), "", lambda message: None)
+    assert observed["command"][1:3] == ["-m", "mvp.xhs_worker"]
+    limit_index = observed["command"].index("--crawler_max_notes_count")
+    assert observed["command"][limit_index + 1] == "20"
+
+
+def test_xhs_access_restriction_stops_with_clear_message(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        pipeline.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeCrawler("RuntimeError: MVP_XHS_ACCESS_RESTRICTED\n", code=1),
+    )
+    with pytest.raises(RuntimeError, match="操作频繁"):
+        pipeline.run_job(xhs_request(), "", lambda message: None)
 
 
 def test_douyin_image_post_audio_is_not_a_video():
